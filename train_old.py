@@ -586,7 +586,7 @@ for step in range(train_steps + 1):
     t1 = time.perf_counter()
     dt =  (t1 - t_st)
     approx_time = training_time_ms + (t1 - t0)
-    print0(f'step:{step + 1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time / timed_steps:.2g}ms, step:{dt:.2g}ms', console=True)
+    print0(f'step:{step + 1}/{train_steps} train_time:{approx_time:.0f} step_avg:{approx_time / timed_steps:.2g}s, step:{dt:.2g}s', console=True)
 
 print(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
 dist.destroy_process_group()
