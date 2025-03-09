@@ -9,6 +9,7 @@ import glob
 import subprocess
 import contextlib
 from dataclasses import dataclass
+from cprint import c_print
 
 import torch
 
@@ -401,7 +402,7 @@ class Hyperparameters:
     # optimization
     batch_size = 16 * 32 * 1024  # batch size in tokens
     max_device_batch_size = 32 * 1024  # batch size per device in tokens
-    num_iterations = 1390  # number of iterations to run
+    num_iterations = 1  # number of iterations to run
     cooldown_frac = 0.4  # fraction of training spent cooling down the learning rate
     bf16_embeds = True
     # evaluation and logging
@@ -552,7 +553,8 @@ for step in range(train_steps + 1):
         t0 = time.perf_counter()
 
     if last_step:
-        if master_process and args.save_checkpoint:
+        c_print("Training complete.", color='green')
+        if master_process:
             log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
             os.makedirs(f'logs/{run_id}', exist_ok=True)
             torch.save(log, f'logs/{run_id}/state_step{step:06d}.pt')
@@ -582,9 +584,9 @@ for step in range(train_steps + 1):
     # logging
 
     t1 = time.perf_counter()
-    dt = 1000 * (t1 - t_st)
-    approx_time = training_time_ms + 1000 * (t1 - t0)
-    print0(f'step:{step + 1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time / timed_steps:.0f}ms, step:{dt:.0f}ms', console=True)
+    dt =  (t1 - t_st)
+    approx_time = training_time_ms + (t1 - t0)
+    print0(f'step:{step + 1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time / timed_steps:.2g}ms, step:{dt:.2g}ms', console=True)
 
-print0(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
+print(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
 dist.destroy_process_group()
