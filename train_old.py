@@ -396,18 +396,18 @@ class DistributedDataLoader:
 @dataclass
 class Hyperparameters:
     # data
-    train_bin = 'data/fineweb10B/fineweb_train_*.bin'  # input .bin to train on
-    val_bin = 'data/fineweb10B/fineweb_val_*.bin'  # input .bin to eval validation loss on
+    train_files = 'data/fineweb10B/fineweb_train_*.bin'  # input .bin to train on
+    val_files = 'data/fineweb10B/fineweb_val_*.bin'  # input .bin to eval validation loss on
+    val_tokens = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     # optimization
-    batch_size = 2 * 32 * 1024  # batch size in tokens
-    max_device_batch_size = 8 * 1024  # batch size per device in tokens
+    batch_size = 8 * 64 * 1024  # batch size in tokens
     num_iterations = 1390  # number of iterations to run
     cooldown_frac = 0.4  # fraction of training spent cooling down the learning rate
     bf16_embeds = True
     # evaluation and logging
     val_loss_every = 125  # every how many steps to evaluate val loss? 0 for only at the end
-    val_tokens = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     # implementation
+    max_device_batch_size = 64 * 1024  # batch size per device in tokens
     save_checkpoint = False
 
 
@@ -419,7 +419,6 @@ micro_bs = args.max_device_batch_size
 rank = int(os.environ['RANK'])
 local_rank = int(os.environ['LOCAL_RANK'])
 world_size = int(os.environ['WORLD_SIZE'])
-print(f'{world_size = }')
 assert torch.cuda.is_available()
 torch.cuda.set_device(local_rank)
 dist.init_process_group(backend='nccl', device_id=torch.device(local_rank))
@@ -444,6 +443,7 @@ def print0(s, console=False):
 
 
 # begin by printing this file (the Python code)
+c_print(f'{rank = }', color="yellow")
 print0(code)
 print0('=' * 100)
 # log information about the hardware/software environment this is running on
@@ -453,8 +453,8 @@ print0(subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.
 print0('=' * 100)
 
 # load data
-train_loader = DistributedDataLoader(args.train_bin)
-val_loader = DistributedDataLoader(args.val_bin)
+train_loader = DistributedDataLoader(args.train_files)
+val_loader = DistributedDataLoader(args.val_files)
 print0(f'Training dataloader files: {train_loader.files}')
 print0(f'Validation dataloader files: {val_loader.files}')
 print0('=' * 100)
@@ -467,7 +467,7 @@ if args.bf16_embeds:
     for m in model.modules():
         if isinstance(m, nn.Embedding):
             m.bfloat16()
-model = torch.compile(model)
+model = torch.compile(model, mode='reduce-overhead' )
 ddp_model = DDP(model, device_ids=[local_rank], broadcast_buffers=False, gradient_as_bucket_view=True)
 
 # collect the parameters to optimize
@@ -529,39 +529,37 @@ for step in range(train_steps + 1):
     sliding_window_num_blocks.copy_(get_sliding_window_blocks(step))
 
     # --------------- VALIDATION SECTION -----------------
-    if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
-        # stop the clock
-        torch.cuda.synchronize()
-        training_time_ms += 1000 * (time.perf_counter() - t0)
-        # run validation batches
-        model.eval()
-        val_loader.reset()
-        val_loss = 0.0
-        # calculate the number of steps to take in the val loop.
-        val_batch_size = world_size * micro_bs
-        assert args.val_tokens % val_batch_size == 0
-        val_steps = args.val_tokens // val_batch_size
-        print()
-        print(f'{val_batch_size = }, {val_steps = }')
-        for i in range(val_steps):
-            with torch.no_grad():
-                inputs_val, targets_val = val_loader.next_batch(val_batch_size)
-                val_loss += ddp_model(inputs_val, targets_val, sliding_window_num_blocks)
-        dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
-        val_loss /= val_steps
-        # logging
-        print0(f'step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / (timed_steps - 1):.2f}ms', console=True)
-        # start the clock again
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-
-    if last_step:
-        if master_process and args.save_checkpoint:
-            log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-            os.makedirs(f'logs/{run_id}', exist_ok=True)
-            torch.save(log, f'logs/{run_id}/state_step{step:06d}.pt')
-        # the last step only has the validation loop, so break to avoid training
-        break
+    # if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
+    #     # stop the clock
+    #     torch.cuda.synchronize()
+    #     training_time_ms += 1000 * (time.perf_counter() - t0)
+    #     # run validation batches
+    #     model.eval()
+    #     val_loader.reset()
+    #     val_loss = 0.0
+    #     # calculate the number of steps to take in the val loop.
+    #     val_batch_size = world_size * micro_bs
+    #     assert args.val_tokens % val_batch_size == 0
+    #     val_steps = args.val_tokens // val_batch_size
+    #     for _ in range(val_steps):
+    #         with torch.no_grad():
+    #             inputs_val, targets_val = val_loader.next_batch(val_batch_size)
+    #             val_loss += ddp_model(inputs_val, targets_val, sliding_window_num_blocks)
+    #     dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
+    #     val_loss /= val_steps
+    #     # logging
+    #     print0(f'step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / (timed_steps - 1):.2f}ms', console=True)
+    #     # start the clock again
+    #     torch.cuda.synchronize()
+    #     t0 = time.perf_counter()
+    #
+    # if last_step:
+    #     if master_process and args.save_checkpoint:
+    #         log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+    #         os.makedirs(f'logs/{run_id}', exist_ok=True)
+    #         torch.save(log, f'logs/{run_id}/state_step{step:06d}.pt')
+    #     # the last step only has the validation loop, so break to avoid training
+    #     break
 
     # --------------- TRAINING SECTION -----------------
     model.train()
@@ -585,3 +583,6 @@ for step in range(train_steps + 1):
     # logging
     approx_time = training_time_ms + 1000 * (time.perf_counter() - t0)
     print0(f'step:{step + 1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time / timed_steps:.2f}ms', console=True)
+
+print0(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
+dist.destroy_process_group()
