@@ -419,12 +419,13 @@ micro_bs = args.max_device_batch_size
 rank = int(os.environ['RANK'])
 local_rank = int(os.environ['LOCAL_RANK'])
 world_size = int(os.environ['WORLD_SIZE'])
-print(f'{world_size = }')
+# print(f'{world_size = }')
 assert torch.cuda.is_available()
 torch.cuda.set_device(local_rank)
 dist.init_process_group(backend='nccl', device_id=torch.device(local_rank))
 dist.barrier()
 master_process = (rank == 0)  # this process will do logging, checkpointing etc.
+print(f'{rank = } {local_rank = } {world_size = }')
 
 # begin logging
 logfile = None
@@ -435,12 +436,12 @@ if master_process:
     print(logfile)
 
 
-def print0(s, console=False):
-    if master_process:
-        with open(logfile, 'a') as f:
-            if console:
-                print(s)
-            print(s, file=f)
+def print0(s, console=True):
+
+    with open(logfile, 'a') as f:
+        if console:
+            print(s)
+        print(s, file=f)
 
 
 # begin by printing this file (the Python code)
@@ -509,6 +510,13 @@ def get_sliding_window_blocks(it):
 
 sliding_window_num_blocks = torch.tensor(1, dtype=torch.int32, device='cuda')
 
+# Save initial model
+if master_process:
+    os.makedirs(f'logs/{run_id}', exist_ok=True)
+    log = dict(step=0, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+    torch.save(log, f'logs/{run_id}/state_step{0:06d}.pt')
+
+
 # Start training loop
 training_time_ms = 0
 # start the clock
@@ -516,6 +524,7 @@ torch.cuda.synchronize()
 t0 = time.perf_counter()
 # begin training
 train_steps = args.num_iterations
+print("Starting Training ... ")
 for step in range(train_steps + 1):
     last_step = (step == train_steps)
     # This effectively ignores timing first 10 steps, which are slower for weird reasons.
@@ -541,9 +550,7 @@ for step in range(train_steps + 1):
         val_batch_size = world_size * micro_bs
         assert args.val_tokens % val_batch_size == 0
         val_steps = args.val_tokens // val_batch_size
-        print()
-        print(f'{val_batch_size = }, {val_steps = }')
-        for i in range(val_steps):
+        for _ in range(val_steps):
             with torch.no_grad():
                 inputs_val, targets_val = val_loader.next_batch(val_batch_size)
                 val_loss += ddp_model(inputs_val, targets_val, sliding_window_num_blocks)
@@ -555,15 +562,25 @@ for step in range(train_steps + 1):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-    if last_step:
-        if master_process and args.save_checkpoint:
+    # Save a few intermediate checkpoints
+    if step == train_steps // 4:
+        if master_process:
             log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-            os.makedirs(f'logs/{run_id}', exist_ok=True)
+            # os.makedirs(f'logs/{run_id}', exist_ok=True)
+            torch.save(log, f'logs/{run_id}/state_step{step:06d}.pt')
+
+    if last_step:
+        c_print("Training complete.", color='green')
+        if master_process:
+            log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+            #os.makedirs(f'logs/{run_id}', exist_ok=True)
             torch.save(log, f'logs/{run_id}/state_step{step:06d}.pt')
         # the last step only has the validation loop, so break to avoid training
         break
 
+
     # --------------- TRAINING SECTION -----------------
+    t_st = time.perf_counter()
     model.train()
     batch_size = args.batch_size
     assert batch_size % world_size == 0
@@ -583,5 +600,11 @@ for step in range(train_steps + 1):
     # null the gradients
     model.zero_grad(set_to_none=True)
     # logging
-    approx_time = training_time_ms + 1000 * (time.perf_counter() - t0)
-    print0(f'step:{step + 1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time / timed_steps:.2f}ms', console=True)
+
+    t1 = time.perf_counter()
+    dt =  (t1 - t_st)
+    approx_time = training_time_ms + (t1 - t0)
+    print0(f'step:{step + 1}/{train_steps} train_time:{approx_time:.0f} step_avg:{approx_time / timed_steps:.2f}s, step:{dt:.3g}s', console=True)
+
+print(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
+dist.destroy_process_group()
